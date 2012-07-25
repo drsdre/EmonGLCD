@@ -48,11 +48,11 @@
 const int SolarPV_type=2;
 //--------------------------------------------------------------------------------------------
 
-#include <OneWire.h>		    // http://www.pjrc.com/teensy/td_libs_OneWire.html
+#include <OneWire.h>                // http://www.pjrc.com/teensy/td_libs_OneWire.html
 #include <DallasTemperature.h>      // http://download.milesburton.com/Arduino/MaximTemperature/ (3.7.2 Beta needed for Arduino 1.0)
 
-//JeeLab libraires		       http://github.com/jcw
-#include <JeeLib.h>		    // ports and RFM12 - used for RFM12B wireless
+//JeeLab libraires                  http://github.com/jcw
+#include <JeeLib.h>                 // ports and RFM12 - used for RFM12B wireless
 #include <RTClib.h>                 // Real time clock (RTC) - used for software RTC to reset kWh counters at midnight
 #include <Wire.h>                   // Part of Arduino libraries - needed for RTClib
 
@@ -60,15 +60,17 @@ const int SolarPV_type=2;
 #include <avr/pgmspace.h>           // Part of Arduino libraries - needed for GLCD lib
 
 GLCD_ST7565 glcd;
- 
+#define INIT_BACKLIGHT 200
+unsigned char backlightbr = INIT_BACKLIGHT;
+
 #define ONE_WIRE_BUS 5              // temperature sensor connection - hard wired 
 const int greenLED=6;               // Green tri-color LED - dig 8 for emonGLCD V1.2
 const int redLED=9;                 // Red tri-color LED
-const int enterswitchpin=15;		    // digital pin of onboard pushswitch 
-const int LDRpin=4;    		    // analog pin of onboard lightsensor 
+const int enterswitchpin=15;        // digital pin of onboard pushswitch 
+const int LDRpin=4;                 // analog pin of onboard lightsensor 
 const int upswitchpin=16;           // digital pin of up switch - low when pressed
 const int downswitchpin=19;         // digital pin of down switch - low when pressed
-
+unsigned char downswitchprev = 0;
 
 #define MYNODE 20            //Should be unique on network, node ID 30 reserved for base station
 #define freq RF12_433MHZ     //frequency - match to same frequency as RFM12B module (change to 868Mhz or 915Mhz if appropriate)
@@ -94,7 +96,7 @@ PayloadBase emonbase;
 // Power variables
 //--------------------------------------------------------------------------------------------
 int importing, night;                                  //flag to indicate import/export
-double consuming, gen, grid;
+double consuming, gen, maxgen, grid;
 double wh_gen[7], wh_consuming[7];     //integer variables to store ammout of power currenty being consumed grid (in/out) +gen
 unsigned long whtime;                    	       //used to calculate energy used per day (kWh/d)
 
@@ -104,6 +106,8 @@ unsigned long whtime;                    	       //used to calculate energy used
 OneWire oneWire(ONE_WIRE_BUS);
 DallasTemperature sensors(&oneWire);
 double temp,maxtemp,mintemp;
+#define MINTEMP -15
+#define MAXTEMP 40
 
 //--------------------------------------------------------------------------------------------
 // Software RTC setup
@@ -129,15 +133,15 @@ void setup () {
     glcd.begin(0x20);    //begin glcd library and set contrast 0x20 is max, 0x18 seems to look best on emonGLCD
     glcd.backLight(200); //max 255
    
+    Serial.begin(9600);
     #ifdef DEBUG 
-      Serial.begin(9600);
       print_glcd_setup();
     #endif
     
     pinMode(greenLED, OUTPUT); pinMode(redLED, OUTPUT);
     pinMode(enterswitchpin, INPUT); pinMode(upswitchpin, INPUT); pinMode(downswitchpin, INPUT); 
     // UNCOMMENT THE FOLLOWING LINE IF YOU HAVE emonGLCD V1.3 (http://openenergymonitor.blogspot.co.uk/2012/04/emonglcd-v13-switches-fix.html)
-    //digitalWrite(enterswitchpin, HIGH); digitalWrite(upswitchpin, HIGH); digitalWrite(downswitchpin, HIGH); //enable Atmega328 10K internal pullup resistors  
+    //digitalWrite(enterswitchpin, HIGH); digitalWrite(upswitchpin, HIGH); digitalWrite(downswitchpin, HIGH); //enable Atmega328 10K internal pullup resistors
   
     sensors.begin();                         // start up the DS18B20 temp sensor onboard  
     sensors.requestTemperatures();
@@ -155,7 +159,6 @@ void setup () {
 // Loop
 //--------------------------------------------------------------------------------------------
 void loop () {
-  
     //--------------------------------------------------------------------------------------------
     // 1. On RF recieve
     //--------------------------------------------------------------------------------------------  
@@ -201,7 +204,9 @@ void loop () {
     
     if (millis()<50000){   //reset min and max at the beginning of the sketch 
       mintemp=0;
-      maxtemp=0;}
+      maxtemp=0;
+      maxgen=0;
+    }
       
    if ((millis()>50000) && (millis() < 60000))   
      mintemp=temp;
@@ -212,7 +217,6 @@ void loop () {
     if ((millis()-slow_update)>10000)
     {
        slow_update = millis();
-       
       
        backlight_control(); // issue when emonGLCD does not receive correct time from base station display switches off - disable auto switch off at night as a precution 
        
@@ -221,9 +225,7 @@ void loop () {
        temp = (sensors.getTempCByIndex(0));
        if (temp > maxtemp) maxtemp = temp;
        if (temp < mintemp) mintemp = temp;
-       
-       
- }
+    }
    
     //--------------------------------------------------------------------
     // Update the display every 200ms
@@ -232,31 +234,44 @@ void loop () {
     {
       fast_update = millis();
 
-       //Read switches 
-       int S1=digitalRead(enterswitchpin); //low when pressed
-       int S2=digitalRead(upswitchpin);    //low when pressed
-       int S3=digitalRead(downswitchpin);  //low when pressed
-       
-       if (S1==1) // S1==0 if v1.3
-       { 
-         draw_page_two(); // V1.4
-       }
-       else if (S2==1) // S2==0 if v1.3
-       {
-         draw_history();       //if 2nd switch (middle) is pressed, display 3rd page
-       }
-       else
-       {
-         draw_main_screen();
-       }
-       // Control led's
-       led_control();
-    
-    }
-  
+      //Read switches 
+      int S1=digitalRead(enterswitchpin); //low when pressed
+      int S2=digitalRead(upswitchpin);    //low when pressed
+      int S3=digitalRead(downswitchpin);  //low when pressed
 
-       
+      if (S1==1) // S1==0 if v1.3
+      { 
+        draw_clock();
+      }
+      else if (S2==1) // S2==0 if v1.3
+      {
+        draw_history();       //if 2nd switch (middle) is pressed, display 3rd page
+      }
+      else
+      {
+        draw_main_screen();
+      }
+
+      // Switch background light
+      if (S3 == 0)
+      {
+        if (downswitchprev == 0)
+        {
+          downswitchprev = 1;
+          if (backlightbr == 0) backlightbr = 1; else backlightbr = 0; 
+          backlight_control();
+        }
+      }
+      else
+      {
+        downswitchprev = 0;
+      }
+
+    // Control led's
+    led_control();
+    }
 } //end loop
+
 //--------------------------------------------------------------------------------------------
 
 //--------------------------------------------------------------------
@@ -268,41 +283,40 @@ void power_calculations()
   int last_hour = hour;
   hour = now.hour();
   if (last_hour == 23 && hour == 00) 
-{ 
-  int i;
-  for (i=6; i>0; i--)
-  {
-    wh_gen[i]=wh_gen[i-1]; 
-  }
-  wh_gen[0] = 0; 
-  
-  for(i=6; i>0; i--)
-  {
-    wh_consuming[i]=wh_consuming[i-1];
-  }
-  wh_consuming[0] = 0; 
-  
-}
-  
- gen = emontx.power2;  if (gen<50) gen=0;	// set minimum generation threshold before emonGLCD displays generation 
-  
-  if (SolarPV_type==1)
+  { 
+    int i;
+    for (i=6; i>0; i--)
     {
-      consuming = emontx.power1; 		 // for type 1 solar PV monitoring
-      grid = consuming - gen;		        // for type 1 solar PV monitoring
+      wh_gen[i]=wh_gen[i-1]; 
     }
+    wh_gen[0] = 0; 
   
+    for(i=6; i>0; i--)
+    {
+      wh_consuming[i]=wh_consuming[i-1];
+    }
+    wh_consuming[0] = 0; 
+  }
+
+  gen = emontx.power2;  if (gen<50) gen=0;	// set minimum generation threshold before emonGLCD displays generation 
+
+  if (SolarPV_type==1)
+  {
+    consuming = emontx.power1;                // for type 1 solar PV monitoring
+    grid = consuming - gen;                   // for type 1 solar PV monitoring
+  }
+
   if (SolarPV_type==2)
   {
-    grid=emontx.power1; 		         // for type 2 solar PV monitoring                     
-    consuming=gen + emontx.power1; 	        // for type 2 solar PV monitoring - grid should be positive when importing and negastive when exporting. Flip round CT cable clap orientation if not
+    grid=emontx.power1;                         // for type 2 solar PV monitoring                     
+    consuming=gen + emontx.power1;              // for type 2 solar PV monitoring - grid should be positive when importing and negative when exporting. Flip round CT cable clap orientation if not
   }
-         
+
   if (gen > consuming) {
     importing=0; 			        //set importing flag 
-    grid= grid*-1;			        //set grid to be positive - the text 'importing' will change to 'exporting' instead. 
+    grid=grid*-1;			        //set grid to be positive
   } else importing=1;
-            
+
   //--------------------------------------------------
   // kWh calculation
   //--------------------------------------------------
@@ -314,5 +328,3 @@ void power_calculations()
   wh_consuming[0]=wh_consuming[0]+whInc;
   //---------------------------------------------------------------------- 
 }
-
-
